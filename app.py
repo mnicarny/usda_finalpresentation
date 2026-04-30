@@ -192,23 +192,65 @@ else:
 # ===============================
 st.header("Rural Development Analysis")
 
-if rd_col:
-    rd_df = df[df[rd_col] == True]
+if page_col:
+    rd_df = df[
+        df[page_col]
+        .astype(str)
+        .str.lower()
+        .str.contains("rural development", na=False)
+    ]
 
-    if users_col:
-        st.metric("Rural Development Users", int(rd_df[users_col].sum()))
+    if rd_df.empty:
+        st.warning("No page titles containing 'Rural Development' were found.")
+    else:
+        st.success(f"Found {len(rd_df):,} rows with page titles containing 'Rural Development'.")
 
-        fig = px.bar(
-            rd_df.groupby(page_col)[users_col].sum().reset_index(),
-            x=users_col,
-            y=page_col,
-            orientation="h",
-            title="Rural Development Pages"
+        if users_col:
+            st.metric("Rural Development Users", int(rd_df[users_col].fillna(0).sum()))
+
+        if sessions_col:
+            st.metric("Rural Development Sessions", int(rd_df[sessions_col].fillna(0).sum()))
+
+        if page_col and users_col:
+            rd_pages = (
+                rd_df.groupby(page_col, dropna=False)[users_col]
+                .sum()
+                .sort_values(ascending=False)
+                .head(15)
+                .reset_index()
+            )
+
+            fig = px.bar(
+                rd_pages,
+                x=users_col,
+                y=page_col,
+                orientation="h",
+                title="Top Rural Development Pages by Users",
+                labels={
+                    users_col: "Users",
+                    page_col: "Page Title"
+                }
+            )
+
+            fig.update_layout(
+                yaxis={"categoryorder": "total ascending"},
+                height=600
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Rural Development Filtered Data")
+        st.dataframe(rd_df, use_container_width=True)
+
+        rd_csv = rd_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download Rural Development Data",
+            rd_csv,
+            "rural_development_filtered_data.csv",
+            "text/csv"
         )
-        st.plotly_chart(fig, use_container_width=True)
 else:
-    st.warning("Rural Development field not found")
-
+    st.warning("Page title column not found, so Rural Development pages could not be detected.")
 
 # ===============================
 # DATA TABLE + DOWNLOAD
