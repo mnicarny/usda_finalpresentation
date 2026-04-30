@@ -43,7 +43,7 @@ ALLOWED_DEVICES = ["desktop", "mobile", "tablet", "smart tv"]
 # HELPER FUNCTIONS
 # ============================================================
 
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_columns(df):
     df = df.copy()
     df.columns = (
         df.columns.astype(str)
@@ -59,7 +59,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def find_col(df: pd.DataFrame, keywords: list[str]) -> str | None:
+def find_col(df, keywords):
     for col in df.columns:
         col_lower = str(col).lower()
         for key in keywords:
@@ -68,57 +68,55 @@ def find_col(df: pd.DataFrame, keywords: list[str]) -> str | None:
     return None
 
 
-def convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+def detect_traffic_date_col(df):
+    for col in df.columns:
+        col_clean = str(col).lower().strip()
 
-    skip_cols = {"source_file", "source_sheet"}
+        if "traffic" in col_clean and "date" in col_clean and "2025" in col_clean:
+            return col
 
     for col in df.columns:
-        if col in skip_cols:
+        col_clean = str(col).lower().strip()
+
+        if "traffic" in col_clean and "date" in col_clean:
+            return col
+
+    return find_col(df, ["traffic_date_2025_assumed", "traffic_date", "date"])
+
+
+def convert_numeric_columns(df):
+    df = df.copy()
+
+    for col in df.columns:
+        if col in ["source_file", "source_sheet"]:
             continue
 
         converted = pd.to_numeric(df[col], errors="coerce")
-        valid_rate = converted.notna().mean()
 
-        if valid_rate >= 0.25:
+        if converted.notna().mean() >= 0.25:
             df[col] = converted
 
     return df
 
 
-def parse_traffic_date(series: pd.Series) -> pd.Series:
+def parse_traffic_date(series):
     raw = series.copy()
-
-    if pd.api.types.is_datetime64_any_dtype(raw):
-        return pd.to_datetime(raw, errors="coerce")
-
     raw_text = raw.astype(str).str.strip()
-    raw_text = raw_text.replace({"nan": np.nan, "None": np.nan, "NaT": np.nan})
 
-    eight_digit_rate = raw_text.str.match(r"^\d{8}$", na=False).mean()
+    raw_text = raw_text.str.replace(".0", "", regex=False)
 
-    if eight_digit_rate > 0.5:
-        return pd.to_datetime(raw_text, format="%Y%m%d", errors="coerce")
+    if raw_text.str.match(r"^\d{8}$", na=False).mean() > 0.50:
+        parsed = pd.to_datetime(raw_text, format="%Y%m%d", errors="coerce")
+    else:
+        parsed = pd.to_datetime(raw_text, errors="coerce")
 
-    numeric = pd.to_numeric(raw, errors="coerce")
+    if parsed.notna().sum() > 0 and parsed.dt.year.median() < 2020:
+        parsed = pd.to_datetime(raw_text, format="%Y%m%d", errors="coerce")
 
-    if numeric.notna().mean() > 0.5:
-        median_value = numeric.dropna().median()
-
-        if median_value > 10_000_000:
-            return pd.to_datetime(
-                numeric.round(0).astype("Int64").astype(str),
-                format="%Y%m%d",
-                errors="coerce"
-            )
-
-        if 20_000 <= median_value <= 60_000:
-            return pd.to_datetime(numeric, unit="D", origin="1899-12-30", errors="coerce")
-
-    return pd.to_datetime(raw_text, errors="coerce")
+    return parsed
 
 
-def format_number(value) -> str:
+def format_number(value):
     try:
         if pd.isna(value):
             return "N/A"
@@ -127,50 +125,7 @@ def format_number(value) -> str:
         return "N/A"
 
 
-def build_insights(df: pd.DataFrame, page_col: str | None, users_col: str | None, sessions_col: str | None) -> list[str]:
-    insights = []
-
-    if df.empty:
-        return ["No rows are available after filtering."]
-
-    if page_col and users_col and page_col in df.columns and users_col in df.columns:
-        page_summary = (
-            df.groupby(page_col, dropna=False)[users_col]
-            .sum()
-            .sort_values(ascending=False)
-        )
-
-        if not page_summary.empty and page_summary.sum() > 0:
-            top_page = page_summary.index[0]
-            top_value = page_summary.iloc[0]
-            share = top_value / page_summary.sum() * 100
-
-            insights.append(
-                f"**{top_page}** is the highest-activity page, representing about "
-                f"**{share:.1f}%** of filtered user activity."
-            )
-
-    if sessions_col and sessions_col in df.columns:
-        insights.append(
-            f"The filtered view contains **{format_number(df[sessions_col].sum())} sessions**, "
-            "which indicates the scale of digital demand."
-        )
-
-    if page_col and page_col in df.columns:
-        insights.append(
-            f"The current view includes **{df[page_col].nunique():,} unique page titles**, "
-            "which helps identify where users may need clearer navigation."
-        )
-
-    if not insights:
-        insights.append(
-            "The dashboard can load the data, but the available fields are limited for deeper web analytics."
-        )
-
-    return insights
-
-
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_data():
     loaded = []
     inventory = []
     possible_files = []
@@ -249,6 +204,47 @@ def cached_load_data():
     return load_data()
 
 
+def build_insights(df, page_col, users_col, sessions_col):
+    insights = []
+
+    if df.empty:
+        return ["No rows are available after filtering."]
+
+    if page_col and users_col and page_col in df.columns and users_col in df.columns:
+        page_summary = (
+            df.groupby(page_col, dropna=False)[users_col]
+            .sum()
+            .sort_values(ascending=False)
+        )
+
+        if not page_summary.empty and page_summary.sum() > 0:
+            top_page = page_summary.index[0]
+            top_value = page_summary.iloc[0]
+            share = top_value / page_summary.sum() * 100
+
+            insights.append(
+                f"**{top_page}** is the highest-activity page, representing about "
+                f"**{share:.1f}%** of filtered user activity."
+            )
+
+    if sessions_col and sessions_col in df.columns:
+        insights.append(
+            f"The filtered view contains **{format_number(df[sessions_col].sum())} sessions**, "
+            "which indicates the scale of digital demand."
+        )
+
+    if page_col and page_col in df.columns:
+        insights.append(
+            f"The current view includes **{df[page_col].nunique():,} unique page titles**, "
+            "which helps identify where users may need clearer navigation."
+        )
+
+    if not insights:
+        insights.append("The available fields are limited, but the dashboard still profiles the data.")
+
+    return insights
+
+
 # ============================================================
 # LOAD DATA
 # ============================================================
@@ -262,14 +258,11 @@ df = convert_numeric_columns(df)
 # ============================================================
 
 page_col = find_col(df, ["page_title", "page", "title"])
-
-date_col = find_col(df, ["traffic_date_2025_assumed"])
-if not date_col:
-    date_col = find_col(df, ["traffic_date", "date"])
+date_col = detect_traffic_date_col(df)
 
 country_col = find_col(df, ["country"])
 device_col = find_col(df, ["device"])
-channel_col = find_col(df, ["channel", "source", "medium"])
+channel_col = find_col(df, ["channel", "medium"])
 
 users_col = find_col(df, ["active_users", "total_users", "users", "visitors"])
 sessions_col = find_col(df, ["sessions", "visits"])
@@ -282,11 +275,16 @@ returning_col = find_col(df, ["returning_users", "returning"])
 
 
 # ============================================================
-# DATE CLEANING
+# DATE CLEANING: TRAFFIC DATE (2025 ASSUMED)
 # ============================================================
 
 if date_col and date_col in df.columns:
     df[date_col] = parse_traffic_date(df[date_col])
+else:
+    st.warning(
+        "Traffic Date (2025 Assumed) column was not found. "
+        "The dashboard will still run, but date filtering and trend charts will be unavailable."
+    )
 
 
 # ============================================================
@@ -310,12 +308,13 @@ if date_col and date_col in filtered_df.columns and filtered_df[date_col].notna(
 
     if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
         start_date, end_date = selected_dates
+
         filtered_df = filtered_df[
             (filtered_df[date_col].dt.date >= start_date) &
             (filtered_df[date_col].dt.date <= end_date)
         ]
 else:
-    st.sidebar.warning("Traffic Date (2025 Assumed) was not detected or could not be parsed.")
+    st.sidebar.info("Date filter unavailable because no valid traffic date was detected.")
 
 if device_col and device_col in filtered_df.columns:
     filtered_df[device_col] = (
@@ -327,11 +326,9 @@ if device_col and device_col in filtered_df.columns:
 
     filtered_df = filtered_df[filtered_df[device_col].isin(ALLOWED_DEVICES)]
 
-    devices = sorted(filtered_df[device_col].dropna().unique())
-
     selected_devices = st.sidebar.multiselect(
         "Device Category",
-        devices,
+        sorted(filtered_df[device_col].dropna().unique()),
         default=[]
     )
 
@@ -485,6 +482,7 @@ with tab2:
                         users_col: "Users"
                     }
                 )
+
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning("No valid date records are available for the trend chart.")
@@ -638,9 +636,7 @@ with tab3:
                         segment_metrics.append(col)
 
             if len(segment_metrics) < 2:
-                st.warning(
-                    "At least two numeric metrics are needed for Rural Development clustering."
-                )
+                st.warning("At least two numeric metrics are needed for Rural Development clustering.")
 
             else:
                 selected_metrics = st.multiselect(
@@ -669,7 +665,8 @@ with tab3:
                         total_rd_users = rd_page_segments[users_col].sum()
                         rd_page_segments["share_of_rd_users"] = (
                             rd_page_segments[users_col] / total_rd_users
-                            if total_rd_users > 0 else 0
+                            if total_rd_users > 0
+                            else 0
                         )
 
                     clustering_cols = [
@@ -678,9 +675,7 @@ with tab3:
                     ]
 
                     if len(rd_page_segments) < 2:
-                        st.warning(
-                            "Not enough Rural Development pages for clustering after filters."
-                        )
+                        st.warning("Not enough Rural Development pages for clustering after filters.")
 
                     elif len(clustering_cols) < 2:
                         st.warning("Not enough usable numeric columns for clustering.")
