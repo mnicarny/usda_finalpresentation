@@ -5,13 +5,12 @@
 
 from pathlib import Path
 
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
 import plotly.express as px
-
-from sklearn.preprocessing import StandardScaler
+import streamlit as st
 from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
 
 # ============================================================
@@ -44,7 +43,7 @@ ALLOWED_DEVICES = ["desktop", "mobile", "tablet", "smart tv"]
 # HELPER FUNCTIONS
 # ============================================================
 
-def normalize_columns(df):
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = (
         df.columns.astype(str)
@@ -55,33 +54,71 @@ def normalize_columns(df):
         .str.replace("/", "_", regex=False)
         .str.replace("(", "", regex=False)
         .str.replace(")", "", regex=False)
+        .str.replace("__", "_", regex=False)
     )
     return df
 
 
-def find_col(df, keywords):
+def find_col(df: pd.DataFrame, keywords: list[str]) -> str | None:
     for col in df.columns:
-        col_lower = col.lower()
+        col_lower = str(col).lower()
         for key in keywords:
             if key in col_lower:
                 return col
     return None
 
 
-def convert_numeric_columns(df):
+def convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    for col in df.columns:
-        if col not in ["source_file", "source_sheet"]:
-            converted = pd.to_numeric(df[col], errors="coerce")
+    skip_cols = {"source_file", "source_sheet"}
 
-            if converted.notna().sum() >= len(df) * 0.25:
-                df[col] = converted
+    for col in df.columns:
+        if col in skip_cols:
+            continue
+
+        converted = pd.to_numeric(df[col], errors="coerce")
+        valid_rate = converted.notna().mean()
+
+        if valid_rate >= 0.25:
+            df[col] = converted
 
     return df
 
 
-def format_number(value):
+def parse_traffic_date(series: pd.Series) -> pd.Series:
+    raw = series.copy()
+
+    if pd.api.types.is_datetime64_any_dtype(raw):
+        return pd.to_datetime(raw, errors="coerce")
+
+    raw_text = raw.astype(str).str.strip()
+    raw_text = raw_text.replace({"nan": np.nan, "None": np.nan, "NaT": np.nan})
+
+    eight_digit_rate = raw_text.str.match(r"^\d{8}$", na=False).mean()
+
+    if eight_digit_rate > 0.5:
+        return pd.to_datetime(raw_text, format="%Y%m%d", errors="coerce")
+
+    numeric = pd.to_numeric(raw, errors="coerce")
+
+    if numeric.notna().mean() > 0.5:
+        median_value = numeric.dropna().median()
+
+        if median_value > 10_000_000:
+            return pd.to_datetime(
+                numeric.round(0).astype("Int64").astype(str),
+                format="%Y%m%d",
+                errors="coerce"
+            )
+
+        if 20_000 <= median_value <= 60_000:
+            return pd.to_datetime(numeric, unit="D", origin="1899-12-30", errors="coerce")
+
+    return pd.to_datetime(raw_text, errors="coerce")
+
+
+def format_number(value) -> str:
     try:
         if pd.isna(value):
             return "N/A"
@@ -90,10 +127,52 @@ def format_number(value):
         return "N/A"
 
 
-def load_data():
+def build_insights(df: pd.DataFrame, page_col: str | None, users_col: str | None, sessions_col: str | None) -> list[str]:
+    insights = []
+
+    if df.empty:
+        return ["No rows are available after filtering."]
+
+    if page_col and users_col and page_col in df.columns and users_col in df.columns:
+        page_summary = (
+            df.groupby(page_col, dropna=False)[users_col]
+            .sum()
+            .sort_values(ascending=False)
+        )
+
+        if not page_summary.empty and page_summary.sum() > 0:
+            top_page = page_summary.index[0]
+            top_value = page_summary.iloc[0]
+            share = top_value / page_summary.sum() * 100
+
+            insights.append(
+                f"**{top_page}** is the highest-activity page, representing about "
+                f"**{share:.1f}%** of filtered user activity."
+            )
+
+    if sessions_col and sessions_col in df.columns:
+        insights.append(
+            f"The filtered view contains **{format_number(df[sessions_col].sum())} sessions**, "
+            "which indicates the scale of digital demand."
+        )
+
+    if page_col and page_col in df.columns:
+        insights.append(
+            f"The current view includes **{df[page_col].nunique():,} unique page titles**, "
+            "which helps identify where users may need clearer navigation."
+        )
+
+    if not insights:
+        insights.append(
+            "The dashboard can load the data, but the available fields are limited for deeper web analytics."
+        )
+
+    return insights
+
+
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     loaded = []
     inventory = []
-
     possible_files = []
 
     if DATA_FILE.exists():
@@ -103,6 +182,8 @@ def load_data():
         possible_files.extend(list(DATA_FOLDER.glob("*.xlsx")))
         possible_files.extend(list(DATA_FOLDER.glob("*.xls")))
         possible_files.extend(list(DATA_FOLDER.glob("*.csv")))
+
+    possible_files = list(dict.fromkeys(possible_files))
 
     if not possible_files:
         st.error(
@@ -117,6 +198,7 @@ def load_data():
                 temp = pd.read_csv(file)
                 temp = normalize_columns(temp)
                 temp["source_file"] = file.name
+                temp["source_sheet"] = "N/A"
                 loaded.append(temp)
 
                 inventory.append({
@@ -167,44 +249,6 @@ def cached_load_data():
     return load_data()
 
 
-def build_insights(df, page_col, users_col, sessions_col):
-    insights = []
-
-    if df.empty:
-        return ["No rows are available after filtering."]
-
-    if page_col and users_col and page_col in df.columns and users_col in df.columns:
-        page_summary = (
-            df.groupby(page_col, dropna=False)[users_col]
-            .sum()
-            .sort_values(ascending=False)
-        )
-
-        if not page_summary.empty and page_summary.sum() > 0:
-            top_page = page_summary.index[0]
-            top_value = page_summary.iloc[0]
-            share = top_value / page_summary.sum() * 100
-
-            insights.append(
-                f"**{top_page}** is the highest-activity page, representing about "
-                f"**{share:.1f}%** of filtered user activity."
-            )
-
-    if sessions_col and sessions_col in df.columns:
-        insights.append(
-            f"The filtered view contains **{format_number(df[sessions_col].sum())} sessions**, "
-            "which indicates the scale of digital demand."
-        )
-
-    if page_col and page_col in df.columns:
-        insights.append(
-            f"The current view includes **{df[page_col].nunique():,} unique page titles**, "
-            "useful for identifying where users may need clearer navigation."
-        )
-
-    return insights
-
-
 # ============================================================
 # LOAD DATA
 # ============================================================
@@ -219,9 +263,7 @@ df = convert_numeric_columns(df)
 
 page_col = find_col(df, ["page_title", "page", "title"])
 
-# Required date column from the project file:
 date_col = find_col(df, ["traffic_date_2025_assumed"])
-
 if not date_col:
     date_col = find_col(df, ["traffic_date", "date"])
 
@@ -240,35 +282,12 @@ returning_col = find_col(df, ["returning_users", "returning"])
 
 
 # ============================================================
-# DATE CLEANING: TRAFFIC DATE (2025 ASSUMED)
+# DATE CLEANING
 # ============================================================
 
 if date_col and date_col in df.columns:
-    raw_date = df[date_col].copy()
+    df[date_col] = parse_traffic_date(df[date_col])
 
-    # Case 1: dates stored as numbers like 20250121
-    if pd.api.types.is_numeric_dtype(raw_date):
-        df[date_col] = pd.to_datetime(
-            raw_date.astype("Int64").astype(str),
-            format="%Y%m%d",
-            errors="coerce"
-        )
-
-    # Case 2: dates stored as text like "20250121"
-    else:
-        raw_text = raw_date.astype(str).str.strip()
-
-        if raw_text.str.match(r"^\d{8}$").mean() > 0.5:
-            df[date_col] = pd.to_datetime(
-                raw_text,
-                format="%Y%m%d",
-                errors="coerce"
-            )
-        else:
-            df[date_col] = pd.to_datetime(
-                raw_text,
-                errors="coerce"
-            )
 
 # ============================================================
 # SIDEBAR FILTERS
@@ -291,11 +310,12 @@ if date_col and date_col in filtered_df.columns and filtered_df[date_col].notna(
 
     if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
         start_date, end_date = selected_dates
-
         filtered_df = filtered_df[
             (filtered_df[date_col].dt.date >= start_date) &
             (filtered_df[date_col].dt.date <= end_date)
         ]
+else:
+    st.sidebar.warning("Traffic Date (2025 Assumed) was not detected or could not be parsed.")
 
 if device_col and device_col in filtered_df.columns:
     filtered_df[device_col] = (
@@ -305,20 +325,18 @@ if device_col and device_col in filtered_df.columns:
         .str.lower()
     )
 
-    filtered_df = filtered_df[
-        filtered_df[device_col].isin(ALLOWED_DEVICES)
-    ]
+    filtered_df = filtered_df[filtered_df[device_col].isin(ALLOWED_DEVICES)]
+
+    devices = sorted(filtered_df[device_col].dropna().unique())
 
     selected_devices = st.sidebar.multiselect(
         "Device Category",
-        sorted(filtered_df[device_col].dropna().unique()),
+        devices,
         default=[]
     )
 
     if selected_devices:
-        filtered_df = filtered_df[
-            filtered_df[device_col].isin(selected_devices)
-        ]
+        filtered_df = filtered_df[filtered_df[device_col].isin(selected_devices)]
 
 if country_col and country_col in filtered_df.columns:
     selected_countries = st.sidebar.multiselect(
@@ -388,17 +406,26 @@ with tab1:
     unique_pages = filtered_df[page_col].nunique() if page_col and page_col in filtered_df.columns else np.nan
 
     if page_col and page_col in filtered_df.columns:
-        rd_df = filtered_df[
+        rd_df_overview = filtered_df[
             filtered_df[page_col]
             .astype(str)
             .str.lower()
             .str.contains("rural development", na=False)
         ].copy()
     else:
-        rd_df = pd.DataFrame()
+        rd_df_overview = pd.DataFrame()
 
-    rd_users = rd_df[users_col].sum() if users_col and users_col in rd_df.columns else np.nan
-    rd_share = rd_users / total_users * 100 if pd.notna(total_users) and total_users > 0 else np.nan
+    rd_users = (
+        rd_df_overview[users_col].sum()
+        if users_col and users_col in rd_df_overview.columns
+        else np.nan
+    )
+
+    rd_share = (
+        rd_users / total_users * 100
+        if pd.notna(rd_users) and pd.notna(total_users) and total_users > 0
+        else np.nan
+    )
 
     c1, c2, c3, c4, c5 = st.columns(5)
 
@@ -435,7 +462,7 @@ with tab2:
         st.warning("No data available after filtering.")
 
     else:
-        if date_col and users_col and date_col in filtered_df.columns:
+        if date_col and users_col and date_col in filtered_df.columns and users_col in filtered_df.columns:
             st.subheader("Traffic Trend by Traffic Date (2025 Assumed)")
 
             trend_df = (
@@ -458,10 +485,11 @@ with tab2:
                         users_col: "Users"
                     }
                 )
-
                 st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("No valid date records are available for the trend chart.")
 
-        if page_col and users_col and page_col in filtered_df.columns:
+        if page_col and users_col and page_col in filtered_df.columns and users_col in filtered_df.columns:
             st.subheader("Top Pages by User Activity")
 
             top_pages = (
@@ -491,7 +519,7 @@ with tab2:
 
             st.plotly_chart(fig, use_container_width=True)
 
-        if device_col and users_col and device_col in filtered_df.columns:
+        if device_col and users_col and device_col in filtered_df.columns and users_col in filtered_df.columns:
             st.subheader("Device-Level Activity")
 
             device_df = (
@@ -501,22 +529,25 @@ with tab2:
                 .reset_index()
             )
 
-            fig = px.pie(
-                device_df,
-                names=device_col,
-                values=users_col,
-                title="User Activity by Device Category",
-                hole=0.35
-            )
+            if not device_df.empty:
+                fig = px.pie(
+                    device_df,
+                    names=device_col,
+                    values=users_col,
+                    title="User Activity by Device Category",
+                    hole=0.35
+                )
 
-            fig.update_traces(
-                textinfo="percent+label",
-                hovertemplate="<b>%{label}</b><br>Users: %{value:,.0f}<br>Share: %{percent}<extra></extra>"
-            )
+                fig.update_traces(
+                    textinfo="percent+label",
+                    hovertemplate="<b>%{label}</b><br>Users: %{value:,.0f}<br>Share: %{percent}<extra></extra>"
+                )
 
-            st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("No valid device categories were found after filtering.")
 
-        if country_col and users_col and country_col in filtered_df.columns:
+        if country_col and users_col and country_col in filtered_df.columns and users_col in filtered_df.columns:
             st.subheader("Top Countries by User Activity")
 
             country_df = (
@@ -549,7 +580,7 @@ with tab3:
     st.header("Rural Development Segments")
 
     if not page_col or page_col not in filtered_df.columns:
-        st.warning("Page title column was not detected.")
+        st.warning("Page title column was not detected, so Rural Development pages cannot be identified.")
 
     else:
         rd_df = filtered_df[
@@ -561,7 +592,8 @@ with tab3:
 
         if rd_df.empty:
             st.warning(
-                "No page titles containing 'rural development' were found after filters."
+                "No page titles containing 'rural development' were found after filters. "
+                "Please loosen filters or clear the page search."
             )
 
         else:
@@ -586,9 +618,7 @@ with tab3:
                 f"{rd_df[page_col].nunique():,}"
             )
 
-            segment_metrics = []
-
-            for col in [
+            possible_metrics = [
                 users_col,
                 sessions_col,
                 events_col,
@@ -597,16 +627,20 @@ with tab3:
                 bounce_col,
                 exit_col,
                 returning_col
-            ]:
+            ]
+
+            segment_metrics = []
+
+            for col in possible_metrics:
                 if col and col in rd_df.columns:
                     rd_df[col] = pd.to_numeric(rd_df[col], errors="coerce")
-                    if rd_df[col].notna().sum() > 0:
+                    if rd_df[col].notna().sum() > 0 and col not in segment_metrics:
                         segment_metrics.append(col)
 
-            segment_metrics = list(dict.fromkeys(segment_metrics))
-
             if len(segment_metrics) < 2:
-                st.warning("At least two numeric metrics are needed for clustering.")
+                st.warning(
+                    "At least two numeric metrics are needed for Rural Development clustering."
+                )
 
             else:
                 selected_metrics = st.multiselect(
@@ -616,7 +650,7 @@ with tab3:
                 )
 
                 if len(selected_metrics) < 2:
-                    st.warning("Select at least two metrics.")
+                    st.warning("Select at least two metrics to run segmentation.")
 
                 else:
                     rd_page_segments = (
@@ -644,7 +678,9 @@ with tab3:
                     ]
 
                     if len(rd_page_segments) < 2:
-                        st.warning("Not enough Rural Development pages for clustering after filters.")
+                        st.warning(
+                            "Not enough Rural Development pages for clustering after filters."
+                        )
 
                     elif len(clustering_cols) < 2:
                         st.warning("Not enough usable numeric columns for clustering.")
@@ -656,7 +692,8 @@ with tab3:
                             "Number of Segments",
                             min_value=2,
                             max_value=max_clusters,
-                            value=min(4, max_clusters)
+                            value=min(4, max_clusters),
+                            help="The maximum adjusts automatically based on available Rural Development pages."
                         )
 
                         X = (
@@ -675,134 +712,141 @@ with tab3:
                             scaler = StandardScaler()
                             X_scaled = scaler.fit_transform(X_transformed)
 
-                            kmeans = KMeans(
-                                n_clusters=min(k, len(rd_page_segments)),
-                                random_state=42,
-                                n_init=20
-                            )
+                            safe_k = min(k, X_scaled.shape[0])
 
-                            rd_page_segments["segment"] = kmeans.fit_predict(X_scaled)
+                            if safe_k < 2:
+                                st.warning("Clustering cannot run because fewer than two pages are available.")
 
-                            if users_col and users_col in rd_page_segments.columns:
-                                segment_order = (
-                                    rd_page_segments.groupby("segment")[users_col]
-                                    .sum()
-                                    .sort_values(ascending=False)
-                                    .index
-                                    .tolist()
-                                )
                             else:
-                                segment_order = (
-                                    rd_page_segments["segment"]
-                                    .value_counts()
-                                    .index
-                                    .tolist()
+                                kmeans = KMeans(
+                                    n_clusters=safe_k,
+                                    random_state=42,
+                                    n_init=20
                                 )
 
-                            segment_labels = [
-                                "High-Priority Digital Access Pages",
-                                "Broad Navigation / Utility Pages",
-                                "Niche Service Information Pages",
-                                "Lower-Traffic Improvement Candidates",
-                                "High-Exit Attention Pages",
-                                "Repeat-Visitor Support Pages",
-                                "Emerging Demand Pages",
-                                "Specialized Program Pages"
-                            ]
+                                rd_page_segments["segment"] = kmeans.fit_predict(X_scaled)
 
-                            label_map = {
-                                seg: segment_labels[i]
-                                for i, seg in enumerate(segment_order)
-                            }
-
-                            rd_page_segments["segment_label"] = rd_page_segments["segment"].map(label_map)
-
-                            st.subheader("Segment Opportunity Map")
-
-                            x_metric = sessions_col if sessions_col in rd_page_segments.columns else clustering_cols[0]
-                            y_metric = views_col if views_col in rd_page_segments.columns else clustering_cols[1]
-                            size_metric = users_col if users_col in rd_page_segments.columns else clustering_cols[0]
-
-                            fig = px.scatter(
-                                rd_page_segments,
-                                x=x_metric,
-                                y=y_metric,
-                                size=size_metric,
-                                color="segment_label",
-                                hover_name=page_col,
-                                hover_data=clustering_cols[:8],
-                                title="Rural Development Segments: Traffic vs Engagement",
-                                labels={
-                                    x_metric: x_metric.replace("_", " ").title(),
-                                    y_metric: y_metric.replace("_", " ").title(),
-                                    size_metric: size_metric.replace("_", " ").title(),
-                                    "segment_label": "Segment"
-                                }
-                            )
-
-                            fig.update_layout(height=650)
-                            st.plotly_chart(fig, use_container_width=True)
-
-                            st.subheader("Executive Segment Profiles")
-
-                            segment_profile = (
-                                rd_page_segments
-                                .groupby("segment_label")
-                                .agg(
-                                    pages=(page_col, "count"),
-                                    total_activity=(size_metric, "sum")
-                                )
-                                .reset_index()
-                                .sort_values("total_activity", ascending=False)
-                            )
-
-                            st.dataframe(segment_profile, use_container_width=True)
-
-                            st.subheader("AI-Enabled Service Prioritization")
-
-                            recommendations = []
-
-                            for _, row in segment_profile.iterrows():
-                                segment = row["segment_label"]
-
-                                if "High-Priority" in segment:
-                                    rec = "Prioritize chatbot FAQs, guided navigation, and high-volume self-service support."
-                                elif "Navigation" in segment:
-                                    rec = "Improve menu pathways, search labels, and related-service links."
-                                elif "High-Exit" in segment:
-                                    rec = "Review exits and add clearer next-step prompts."
-                                elif "Repeat" in segment:
-                                    rec = "Add task-oriented support for users returning to complete actions."
+                                if users_col and users_col in rd_page_segments.columns:
+                                    segment_order = (
+                                        rd_page_segments.groupby("segment")[users_col]
+                                        .sum()
+                                        .sort_values(ascending=False)
+                                        .index
+                                        .tolist()
+                                    )
                                 else:
-                                    rec = "Monitor content clarity and evaluate whether service instructions are easy to follow."
+                                    segment_order = (
+                                        rd_page_segments["segment"]
+                                        .value_counts()
+                                        .index
+                                        .tolist()
+                                    )
 
-                                recommendations.append({
-                                    "Segment": segment,
-                                    "Pages": row["pages"],
-                                    "Total Activity": row["total_activity"],
-                                    "Executive Recommendation": rec
-                                })
+                                segment_labels = [
+                                    "High-Priority Digital Access Pages",
+                                    "Broad Navigation / Utility Pages",
+                                    "Niche Service Information Pages",
+                                    "Lower-Traffic Improvement Candidates",
+                                    "High-Exit Attention Pages",
+                                    "Repeat-Visitor Support Pages",
+                                    "Emerging Demand Pages",
+                                    "Specialized Program Pages"
+                                ]
 
-                            st.dataframe(pd.DataFrame(recommendations), use_container_width=True)
+                                label_map = {
+                                    seg: segment_labels[i]
+                                    for i, seg in enumerate(segment_order)
+                                }
 
-                            st.subheader("Segmented Rural Development Pages")
+                                rd_page_segments["segment_label"] = rd_page_segments["segment"].map(label_map)
 
-                            display_cols = [page_col, "segment_label"] + clustering_cols
+                                st.subheader("Segment Opportunity Map")
 
-                            st.dataframe(
-                                rd_page_segments[display_cols].sort_values(
-                                    by=size_metric,
-                                    ascending=False
-                                ),
-                                use_container_width=True
-                            )
+                                x_metric = sessions_col if sessions_col in rd_page_segments.columns else clustering_cols[0]
+                                y_metric = views_col if views_col in rd_page_segments.columns else clustering_cols[1]
+                                size_metric = users_col if users_col in rd_page_segments.columns else clustering_cols[0]
 
-                            st.download_button(
-                                "Download Rural Development Segmentation",
-                                rd_page_segments.to_csv(index=False).encode("utf-8"),
-                                "rural_development_segmentation.csv",
-                                "text/csv"
-                            )
+                                fig = px.scatter(
+                                    rd_page_segments,
+                                    x=x_metric,
+                                    y=y_metric,
+                                    size=size_metric,
+                                    color="segment_label",
+                                    hover_name=page_col,
+                                    hover_data=clustering_cols[:8],
+                                    title="Rural Development Segments: Traffic vs Engagement",
+                                    labels={
+                                        x_metric: x_metric.replace("_", " ").title(),
+                                        y_metric: y_metric.replace("_", " ").title(),
+                                        size_metric: size_metric.replace("_", " ").title(),
+                                        "segment_label": "Segment"
+                                    }
+                                )
+
+                                fig.update_layout(height=650)
+                                st.plotly_chart(fig, use_container_width=True)
+
+                                st.subheader("Executive Segment Profiles")
+
+                                segment_profile = (
+                                    rd_page_segments
+                                    .groupby("segment_label")
+                                    .agg(
+                                        pages=(page_col, "count"),
+                                        total_activity=(size_metric, "sum")
+                                    )
+                                    .reset_index()
+                                    .sort_values("total_activity", ascending=False)
+                                )
+
+                                st.dataframe(segment_profile, use_container_width=True)
+
+                                st.subheader("AI-Enabled Service Prioritization")
+
+                                recommendations = []
+
+                                for _, row in segment_profile.iterrows():
+                                    segment = row["segment_label"]
+
+                                    if "High-Priority" in segment:
+                                        rec = "Prioritize chatbot FAQs, guided navigation, and high-volume self-service support."
+                                    elif "Navigation" in segment:
+                                        rec = "Improve menu pathways, search labels, and related-service links."
+                                    elif "High-Exit" in segment:
+                                        rec = "Review exits and add clearer next-step prompts."
+                                    elif "Repeat" in segment:
+                                        rec = "Add task-oriented support for users returning to complete actions."
+                                    else:
+                                        rec = "Monitor content clarity and evaluate whether service instructions are easy to follow."
+
+                                    recommendations.append({
+                                        "Segment": segment,
+                                        "Pages": row["pages"],
+                                        "Total Activity": row["total_activity"],
+                                        "Executive Recommendation": rec
+                                    })
+
+                                rec_df = pd.DataFrame(recommendations)
+                                st.dataframe(rec_df, use_container_width=True)
+
+                                st.subheader("Segmented Rural Development Pages")
+
+                                display_cols = [page_col, "segment_label"] + clustering_cols
+
+                                st.dataframe(
+                                    rd_page_segments[display_cols].sort_values(
+                                        by=size_metric,
+                                        ascending=False
+                                    ),
+                                    use_container_width=True
+                                )
+
+                                st.download_button(
+                                    "Download Rural Development Segmentation",
+                                    rd_page_segments.to_csv(index=False).encode("utf-8"),
+                                    "rural_development_segmentation.csv",
+                                    "text/csv"
+                                )
 
                         except Exception as e:
                             st.warning("Clustering could not be completed with the current filters.")
@@ -889,16 +933,16 @@ with tab4:
         """
         **Most necessary executive features included in this dashboard:**
 
-        1. **Traffic Date (2025 Assumed)** to show when web activity occurred.
-        2. **Page Title** as the benchmark for identifying high-demand pages.
-        3. **Users and Sessions** to measure traffic scale.
-        4. **Device Category** to understand digital access patterns across desktop, mobile, tablet, and smart TV.
-        5. **Engagement proxies** such as views per session, average session duration, bounce rate, exits, and returning users.
-        6. **Rural Development page filter** using page titles that contain `rural development`.
-        7. **Clustering and segmentation** to group Rural Development pages into actionable executive categories.
-        8. **AI-service prioritization** to identify where chatbot support, guided navigation, or clearer pathways may help users.
+        1. **Traffic Date (2025 Assumed)** shows when web activity occurred and is parsed from values like `20250121`.
+        2. **Page Title** is the main benchmark for identifying high-demand USDA pages.
+        3. **Users and Sessions** measure traffic scale and user demand.
+        4. **Device Category** is restricted to `desktop`, `mobile`, `tablet`, and `smart tv`.
+        5. **Engagement proxies** include views per session, average session duration, bounce rate, exits, and returning users when available.
+        6. **Rural Development pages** are identified by page titles containing `rural development`.
+        7. **Clustering and segmentation** group Rural Development pages into actionable executive categories.
+        8. **AI-service prioritization** identifies where chatbot support, guided navigation, or clearer pathways may help users.
 
-        The Page Benchmark Comparison tab was removed because it was less necessary than direct USDA-wide usage,
+        The Page Benchmark Comparison tab was removed to keep the app focused on USDA-wide usage,
         Rural Development segmentation, and AI prioritization.
         """
     )
