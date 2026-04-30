@@ -188,11 +188,12 @@ else:
 
 
 # ===============================
-# RURAL DEVELOPMENT VIEW
+# RURAL DEVELOPMENT VIEW (REVISED)
 # ===============================
 st.header("Rural Development Analysis")
 
 if page_col:
+    # Filter rows where page title contains "rural development"
     rd_df = df[
         df[page_col]
         .astype(str)
@@ -201,19 +202,25 @@ if page_col:
     ]
 
     if rd_df.empty:
-        st.warning("No page titles containing 'Rural Development' were found.")
+        st.warning("No page titles containing 'rural development' found.")
     else:
-        st.success(f"Found {len(rd_df):,} rows with page titles containing 'Rural Development'.")
+        st.success(f"{len(rd_df):,} rows matched 'rural development' in page titles.")
 
+        # KPIs
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if users_col:
+                st.metric("Total Users (Rural Dev)", int(rd_df[users_col].fillna(0).sum()))
+
+        with col2:
+            if sessions_col:
+                st.metric("Total Sessions (Rural Dev)", int(rd_df[sessions_col].fillna(0).sum()))
+
+        # Top pages chart
         if users_col:
-            st.metric("Rural Development Users", int(rd_df[users_col].fillna(0).sum()))
-
-        if sessions_col:
-            st.metric("Rural Development Sessions", int(rd_df[sessions_col].fillna(0).sum()))
-
-        if page_col and users_col:
             rd_pages = (
-                rd_df.groupby(page_col, dropna=False)[users_col]
+                rd_df.groupby(page_col)[users_col]
                 .sum()
                 .sort_values(ascending=False)
                 .head(15)
@@ -225,33 +232,25 @@ if page_col:
                 x=users_col,
                 y=page_col,
                 orientation="h",
-                title="Top Rural Development Pages by Users",
-                labels={
-                    users_col: "Users",
-                    page_col: "Page Title"
-                }
+                title="Top Rural Development Pages by Users"
             )
 
-            fig.update_layout(
-                yaxis={"categoryorder": "total ascending"},
-                height=600
-            )
-
+            fig.update_layout(yaxis={"categoryorder": "total ascending"})
             st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("Rural Development Filtered Data")
+        # Table + download
+        st.subheader("Filtered Rural Development Data")
         st.dataframe(rd_df, use_container_width=True)
 
-        rd_csv = rd_df.to_csv(index=False).encode("utf-8")
         st.download_button(
             "Download Rural Development Data",
-            rd_csv,
-            "rural_development_filtered_data.csv",
+            rd_df.to_csv(index=False).encode("utf-8"),
+            "rural_development_data.csv",
             "text/csv"
         )
-else:
-    st.warning("Page title column not found, so Rural Development pages could not be detected.")
 
+else:
+    st.warning("Page title column not found.")
 # ===============================
 # DATA TABLE + DOWNLOAD
 # ===============================
