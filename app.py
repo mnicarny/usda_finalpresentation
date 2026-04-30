@@ -244,8 +244,31 @@ returning_col = find_col(df, ["returning_users", "returning"])
 # ============================================================
 
 if date_col and date_col in df.columns:
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    raw_date = df[date_col].copy()
 
+    # Case 1: dates stored as numbers like 20250121
+    if pd.api.types.is_numeric_dtype(raw_date):
+        df[date_col] = pd.to_datetime(
+            raw_date.astype("Int64").astype(str),
+            format="%Y%m%d",
+            errors="coerce"
+        )
+
+    # Case 2: dates stored as text like "20250121"
+    else:
+        raw_text = raw_date.astype(str).str.strip()
+
+        if raw_text.str.match(r"^\d{8}$").mean() > 0.5:
+            df[date_col] = pd.to_datetime(
+                raw_text,
+                format="%Y%m%d",
+                errors="coerce"
+            )
+        else:
+            df[date_col] = pd.to_datetime(
+                raw_text,
+                errors="coerce"
+            )
 
 # ============================================================
 # SIDEBAR FILTERS
